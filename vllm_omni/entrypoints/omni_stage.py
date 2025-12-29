@@ -563,9 +563,18 @@ def _stage_worker(
 
                 lock_files = acquired_lock_fds
         except Exception as e:
-            logger.debug("[Stage-%s] Failed to set up sequential initialization lock: %s", stage_id, e)
+            logger.debug(
+                "[Stage-%s] Failed to set up sequential initialization lock: %s",
+                stage_id,
+                e,
+            )
     # Init engine based on stage_type
-    logger.debug("[Stage-%s] Initializing %s engine with args keys=%s", stage_id, stage_type, list(engine_args.keys()))
+    logger.debug(
+        "[Stage-%s] Initializing %s engine with args keys=%s",
+        stage_id,
+        stage_type,
+        list(engine_args.keys()),
+    )
     try:
         if stage_type == "diffusion":
             engine_args.pop("model_stage")
@@ -1027,9 +1036,14 @@ async def _stage_worker_async(
                 for key in ["model", "device", "dtype", "enable_cpu_offload"]:
                     if key in engine_args:
                         od_config[key] = engine_args[key]
-            logger.debug(f"[Stage-%s] Initializing diffusion engine with config: {od_config}", stage_id)
+            logger.debug(
+                f"[Stage-%s] Initializing diffusion engine with config: {od_config}",
+                stage_id,
+            )
             stage_engine = AsyncOmniDiffusion(
-                model=model, od_config=od_config, **{k: v for k, v in engine_args.items() if k != "od_config"}
+                model=model,
+                od_config=od_config,
+                **{k: v for k, v in engine_args.items() if k != "od_config"},
             )
             vllm_config = None  # Diffusion doesn't use vllm_config
         else:
@@ -1052,6 +1066,18 @@ async def _stage_worker_async(
             except (OSError, ValueError):
                 pass
     omni_stage.set_async_engine(stage_engine)
+
+    _running_tasks: set[asyncio.Task] = set()
+
+    async def _force_log():
+        while True:
+            await asyncio.sleep(10)
+            await omni_stage.async_engine.log_stats()
+
+    task = asyncio.create_task(_force_log())
+    _running_tasks.add(task)
+    task.add_done_callback(_running_tasks.remove)
+
     # Don't keep the dummy data in memory (only for LLM engines)
     if stage_type != "diffusion":
         await stage_engine.reset_mm_cache()
