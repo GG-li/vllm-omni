@@ -16,7 +16,6 @@ import sys
 import traceback
 from typing import Any
 
-import vllm.envs as envs
 from vllm.inputs import TextPrompt
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
@@ -27,6 +26,7 @@ from vllm.v1.engine import EngineCoreOutput
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.llm_engine import LLMEngine
 
+import vllm_omni.envs as envs
 from vllm_omni.distributed.omni_connectors import build_stage_connectors
 from vllm_omni.distributed.omni_connectors.adapter import try_recv_via_connector
 from vllm_omni.distributed.ray_utils.utils import kill_ray_actor, start_ray_actor
@@ -1068,7 +1068,7 @@ async def _stage_worker_async(
     async def _force_log():
         while True:
             await asyncio.sleep(envs.VLLM_LOG_STATS_INTERVAL)
-            await omni_stage.async_engine.log_stats()
+            await omni_stage.async_engine.do_log_stats()
 
     task = asyncio.create_task(_force_log())
 
