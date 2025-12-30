@@ -1064,13 +1064,14 @@ async def _stage_worker_async(
             except (OSError, ValueError):
                 pass
     omni_stage.set_async_engine(stage_engine)
+    if omni_stage.async_engine.log_stats:
 
-    async def _force_log():
-        while True:
-            await asyncio.sleep(envs.VLLM_LOG_STATS_INTERVAL)
-            await omni_stage.async_engine.do_log_stats()
+        async def _force_log():
+            while True:
+                await asyncio.sleep(envs.VLLM_LOG_STATS_INTERVAL)
+                await omni_stage.async_engine.do_log_stats()
 
-    task = asyncio.create_task(_force_log())
+        task = asyncio.create_task(_force_log())
 
     # Don't keep the dummy data in memory (only for LLM engines)
     if stage_type != "diffusion":
