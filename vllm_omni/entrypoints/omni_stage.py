@@ -1079,14 +1079,19 @@ async def _stage_worker_async(
             except (OSError, ValueError):
                 pass
     omni_stage.set_async_engine(stage_engine)
-    if omni_stage.async_engine.log_stats:
+    if hasattr(omni_stage.async_engine, "log_stats") and omni_stage.async_engine.log_stats:
 
         async def _force_log():
-            while True:
-                await asyncio.sleep(envs.VLLM_LOG_STATS_INTERVAL)
-                await omni_stage.async_engine.do_log_stats()
+            try:
+                while True:
+                    await asyncio.sleep(envs.VLLM_LOG_STATS_INTERVAL)
+                    await omni_stage.async_engine.do_log_stats()
+            except asyncio.CancelledError:
+                pass
 
-        task = asyncio.create_task(_force_log())
+        log_stats_task = asyncio.create_task(_force_log())
+    else:
+        log_stats_task = None
 
     # Don't keep the dummy data in memory (only for LLM engines)
     if stage_type != "diffusion":
@@ -1273,7 +1278,8 @@ async def _stage_worker_async(
                     }
                 )
             logger.debug("Enqueued result for request %s to downstream", rid)
-
+    if log_stats_task is not None:
+        log_stats_task.cancel()
     logger.info("Stage worker exiting")
 
 
