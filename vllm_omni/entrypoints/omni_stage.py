@@ -27,7 +27,6 @@ from vllm.v1.engine import EngineCoreOutput
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.llm_engine import LLMEngine
 
-import vllm_omni.envs as envs
 from vllm_omni.diffusion.data import OmniDiffusionConfig
 from vllm_omni.distributed.omni_connectors import build_stage_connectors
 from vllm_omni.distributed.omni_connectors.adapter import try_recv_via_connector
@@ -1124,7 +1123,7 @@ async def _stage_worker_async(
         async def _force_log():
             try:
                 while True:
-                    await asyncio.sleep(envs.VLLM_LOG_STATS_INTERVAL)
+                    await asyncio.sleep(10.0)
                     await omni_stage.async_engine.do_log_stats()
             except asyncio.CancelledError:
                 pass
