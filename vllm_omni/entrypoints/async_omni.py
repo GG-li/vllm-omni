@@ -400,6 +400,10 @@ class AsyncOmni(OmniBase):
                                 f"{req_id} at stage {stage_id}: {e}",
                             )
 
+                        is_audio = any(
+                            getattr(stage_, "final_output_type", None) == "audio" for stage_ in self.stage_list
+                        )
+
                         # Handle diffusion outputs that already contain images
                         if stage.final_output_type == "image":
                             images = []
@@ -413,6 +417,8 @@ class AsyncOmni(OmniBase):
                                 request_output=engine_outputs,
                                 images=images,
                             )
+                        elif stage.final_output_type == "text" and is_audio:
+                            pass
                         else:
                             yield OmniRequestOutput(
                                 stage_id=stage_id,
