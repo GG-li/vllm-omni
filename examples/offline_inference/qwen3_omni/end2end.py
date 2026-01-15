@@ -12,6 +12,7 @@ from typing import NamedTuple
 import librosa
 import numpy as np
 import soundfile as sf
+from datasets import Video, load_dataset
 from PIL import Image
 from vllm import SamplingParams
 from vllm.assets.audio import AudioAsset
@@ -237,30 +238,65 @@ query_map = {
 
 def main(args):
     model_name = "Qwen/Qwen3-Omni-30B-A3B-Instruct"
+    prompts = []
 
-    # Get paths from args
-    video_path = getattr(args, "video_path", None)
-    image_path = getattr(args, "image_path", None)
-    audio_path = getattr(args, "audio_path", None)
+    if args.video_dataset:
+        print("[Info] Loading video dataset: sayakpaul/ucf101-subset")
+        num_samples = args.num_samples
+        dataset = load_dataset("sayakpaul/ucf101-subset", split=f"train[:{num_samples}]", trust_remote_code=True)
+        dataset = dataset.cast_column("video", Video(decode=False))
+        data_dir = "download_videos"
+        os.makedirs(data_dir, exist_ok=True)
 
-    # Get the query function and call it with appropriate parameters
-    query_func = query_map[args.query_type]
-    if args.query_type == "use_video":
-        query_result = query_func(video_path=video_path, num_frames=getattr(args, "num_frames", 16))
-    elif args.query_type == "use_image":
-        query_result = query_func(image_path=image_path)
-    elif args.query_type == "use_audio":
-        query_result = query_func(audio_path=audio_path, sampling_rate=getattr(args, "sampling_rate", 16000))
-    elif args.query_type == "mixed_modalities":
-        query_result = query_func(
-            video_path=video_path,
-            image_path=image_path,
-            audio_path=audio_path,
-            num_frames=getattr(args, "num_frames", 16),
-            sampling_rate=getattr(args, "sampling_rate", 16000),
-        )
+        for i in range(min(len(dataset), num_samples)):
+            sample = dataset[i]
+            video_info = sample["video"]
+            original_video_path = video_info["path"]
+
+            video_filename = os.path.basename(original_video_path)
+            video_path = os.path.join(data_dir, video_filename)
+
+            if not os.path.exists(video_path):
+                import shutil
+
+                shutil.copy2(original_video_path, video_path)
+
+            query_result = get_video_query(video_path=video_path, num_frames=getattr(args, "num_frames", 16))
+            prompts.append(query_result.inputs)
+
     else:
-        query_result = query_func()
+        # Get paths from args
+        video_path = getattr(args, "video_path", None)
+        image_path = getattr(args, "image_path", None)
+        audio_path = getattr(args, "audio_path", None)
+
+        # Get the query function and call it with appropriate parameters
+        query_func = query_map[args.query_type]
+        if args.query_type == "use_video":
+            query_result = query_func(video_path=video_path, num_frames=getattr(args, "num_frames", 16))
+        elif args.query_type == "use_image":
+            query_result = query_func(image_path=image_path)
+        elif args.query_type == "use_audio":
+            query_result = query_func(audio_path=audio_path, sampling_rate=getattr(args, "sampling_rate", 16000))
+        elif args.query_type == "mixed_modalities":
+            query_result = query_func(
+                video_path=video_path,
+                image_path=image_path,
+                audio_path=audio_path,
+                num_frames=getattr(args, "num_frames", 16),
+                sampling_rate=getattr(args, "sampling_rate", 16000),
+            )
+        else:
+            query_result = query_func()
+
+        if args.txt_prompts is None:
+            prompts = [query_result.inputs for _ in range(args.num_prompts)]
+        else:
+            assert args.query_type == "text", "txt-prompts is only supported for text query type"
+            with open(args.txt_prompts, encoding="utf-8") as f:
+                lines = [ln.strip() for ln in f.readlines()]
+                prompts = [get_text_query(ln).inputs for ln in lines if ln != ""]
+                print(f"[Info] Loaded {len(prompts)} prompts from {args.txt_prompts}")
 
     omni_llm = Omni(
         model=model_name,
@@ -305,15 +341,6 @@ def main(args):
         talker_sampling_params,  # code predictor is integrated into talker for Qwen3 Omni
         code2wav_sampling_params,
     ]
-
-    if args.txt_prompts is None:
-        prompts = [query_result.inputs for _ in range(args.num_prompts)]
-    else:
-        assert args.query_type == "text", "txt-prompts is only supported for text query type"
-        with open(args.txt_prompts, encoding="utf-8") as f:
-            lines = [ln.strip() for ln in f.readlines()]
-            prompts = [get_text_query(ln).inputs for ln in lines if ln != ""]
-            print(f"[Info] Loaded {len(prompts)} prompts from {args.txt_prompts}")
 
     if args.modalities is not None:
         output_modalities = args.modalities.split(",")
@@ -492,6 +519,18 @@ def parse_args():
         action="store_true",
         default=False,
         help="Use py_generator mode. The returned type of Omni.generate() is a Python Generator object.",
+    )
+    parser.add_argument(
+        "--video-dataset",
+        action="store_true",
+        default=False,
+        help="Test for video dataset.",
+    )
+    parser.add_argument(
+        "--num-samples",
+        type=int,
+        default=1,
+        help="Number of samples to use from the video dataset (default: 1).",
     )
 
     return parser.parse_args()
