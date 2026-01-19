@@ -240,10 +240,12 @@ def main(args):
     model_name = "Qwen/Qwen3-Omni-30B-A3B-Instruct"
     prompts = []
 
-    if args.video_dataset:
-        print("[Info] Loading video dataset: sayakpaul/ucf101-subset")
+    if args.video_dataset is not None:
+        dataset_name = args.video_dataset
+        print(f"[Info] Loading video dataset: {dataset_name}")
+
         num_samples = args.num_samples
-        dataset = load_dataset("sayakpaul/ucf101-subset", split=f"train[:{num_samples}]", trust_remote_code=True)
+        dataset = load_dataset(dataset_name, split=f"train[:{num_samples}]", trust_remote_code=True)
         dataset = dataset.cast_column("video", Video(decode=False))
         data_dir = "download_videos"
         os.makedirs(data_dir, exist_ok=True)
@@ -522,8 +524,9 @@ def parse_args():
     )
     parser.add_argument(
         "--video-dataset",
-        action="store_true",
-        default=False,
+        type=str,
+        nargs="?",
+        const="sayakpaul/ucf101-subset",
         help="Test for video dataset.",
     )
     parser.add_argument(
