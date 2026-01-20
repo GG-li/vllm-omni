@@ -6,13 +6,15 @@ with the correct prompt format on Qwen3-Omni (thinker only).
 """
 
 import os
+import subprocess
+import tempfile
 import time
 from typing import NamedTuple
 
 import librosa
 import numpy as np
 import soundfile as sf
-from datasets import Video, load_dataset
+from datasets import load_dataset
 from PIL import Image
 from vllm import SamplingParams
 from vllm.assets.audio import AudioAsset
@@ -236,35 +238,92 @@ query_map = {
 }
 
 
-def main(args):
-    model_name = "Qwen/Qwen3-Omni-30B-A3B-Instruct"
-    prompts = []
+class DatasetBase:
+    """Base model for datasets hosted for test"""
 
-    if args.video_dataset is not None:
-        dataset_name = args.video_dataset
+    SUPPORTED_DATASET_PATHS: set[str]
+
+    def __init__(
+        self,
+        dataset_path: str,
+        dataset_split: str = "train",
+        dataset_subset: str | None = None,
+        **kwargs,
+    ) -> None:
+        self.dataset_path = dataset_path
+        self.dataset_split = dataset_split
+        self.dataset_subset = dataset_subset
+
+    def load_data(self) -> None:
+        """Load data from Huggingface datasets."""
+        self.data = load_dataset(
+            self.dataset_path,
+            name=self.dataset_subset,
+            split=self.dataset_split,
+        )
+
+
+class VideoDataset(DatasetBase):
+    """Dataset for video data."""
+
+    def __init__(
+        self,
+        dataset_path,
+        num_samples: int = 16,
+        **kwargs,
+    ) -> None:
+        super().__init__(dataset_path=dataset_path, **kwargs)
+        self.num_samples = num_samples
+        self.load_data()
+
+    SUPPORTED_DATASET_PATHS = {"sayakpaul/ucf101-subset"}
+
+    def load_date(self) -> None:
+        self.data = load_dataset("webdataset", data_files=self.dataset_path, split=f"train[:{self.num_samples}]")
+
+    def sample(
+        self,
+        num_samples,
+    ) -> list:
+        dataset_name = self.dataset_path
         print(f"[Info] Loading video dataset: {dataset_name}")
-
-        num_samples = args.num_samples
-        dataset = load_dataset(dataset_name, split=f"train[:{num_samples}]", trust_remote_code=True)
-        dataset = dataset.cast_column("video", Video(decode=False))
+        prompts = []
         data_dir = "download_videos"
         os.makedirs(data_dir, exist_ok=True)
 
-        for i in range(min(len(dataset), num_samples)):
-            sample = dataset[i]
-            video_info = sample["video"]
-            original_video_path = video_info["path"]
+        for i in range(min(len(self.data), num_samples)):
+            sample = self.data[i]
+            video_bytes = sample["avi"]
+            mp4_path = os.path.join(data_dir, f"sample_{i + 1}.mp4")
 
-            video_filename = os.path.basename(original_video_path)
-            video_path = os.path.join(data_dir, video_filename)
+            if not os.path.exists(mp4_path):
+                with tempfile.NamedTemporaryFile(delete=True, suffix=".mp4") as tmp_avi:
+                    tmp_avi.write(video_bytes)
+                    tmp_avi.flush()
+                    subprocess.run(
+                        ["ffmpeg", "-y", "-i", tmp_avi.name, "-c:v", "copy", "-c:a", "copy", mp4_path],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
 
-            if not os.path.exists(video_path):
-                import shutil
-
-                shutil.copy2(original_video_path, video_path)
-
-            query_result = get_video_query(video_path=video_path, num_frames=getattr(args, "num_frames", 16))
+            query_result = get_video_query(video_path=mp4_path, num_frames=getattr(args, "num_frames", 16))
             prompts.append(query_result.inputs)
+        return prompts
+
+
+def main(args):
+    model_name = "Qwen/Qwen3-Omni-30B-A3B-Instruct"
+
+    if args.hf_dataset is not None:
+        if args.hf_dataset in VideoDataset.SUPPORTED_DATASET_PATHS:
+            dataset_cls = VideoDataset
+            common_kwargs = {"dataset_path": args.dataset_path, "num_samples": args.num_samples}
+            sample_kwargs = {
+                "num_samples": args.num_samples,
+            }
+        else:
+            raise ValueError(f"Dataset {args.dataset_path} is not supported.")
+        prompts = dataset_cls(**common_kwargs).sample(**sample_kwargs)
 
     else:
         # Get paths from args
@@ -523,11 +582,16 @@ def parse_args():
         help="Use py_generator mode. The returned type of Omni.generate() is a Python Generator object.",
     )
     parser.add_argument(
-        "--video-dataset",
+        "--hf-dataset",
         type=str,
-        nargs="?",
-        const="sayakpaul/ucf101-subset",
-        help="Test for video dataset.",
+        default=None,
+        help="Name of the Hugging Face dataset for video inference.",
+    )
+    parser.add_argument(
+        "--dataset-path",
+        type=str,
+        default="home/lsh-omni/.ucf101/UCF101_subset.tar.gz",
+        help="Path to local dataset for video inference.",
     )
     parser.add_argument(
         "--num-samples",
