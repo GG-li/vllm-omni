@@ -15,6 +15,7 @@ import librosa
 import numpy as np
 import soundfile as sf
 from datasets import load_dataset
+import vllm
 from PIL import Image
 from vllm import SamplingParams
 from vllm.assets.audio import AudioAsset
@@ -228,13 +229,39 @@ def get_multi_audios_query() -> QueryResult:
     )
 
 
+def get_use_audio_in_video_query() -> QueryResult:
+    question = "Describe the content of the video in details, then convert what the baby say into text."
+    prompt = (
+        f"<|im_start|>system\n{default_system}<|im_end|>\n"
+        "<|im_start|>user\n<|vision_start|><|video_pad|><|vision_end|>"
+        f"{question}<|im_end|>\n"
+        f"<|im_start|>assistant\n"
+    )
+    asset = VideoAsset(name="baby_reading", num_frames=16)
+    audio = asset.get_audio(sampling_rate=16000)
+    return QueryResult(
+        inputs={
+            "prompt": prompt,
+            "multi_modal_data": {
+                "video": asset.np_ndarrays,
+                "audio": audio,
+            },
+            "mm_processor_kwargs": {
+                "use_audio_in_video": True,
+            },
+        },
+        limit_mm_per_prompt={"audio": 1, "video": 1},
+    )
+
+
 query_map = {
     "text": get_text_query,
     "use_audio": get_audio_query,
     "use_image": get_image_query,
     "use_video": get_video_query,
-    "multi_audios": get_multi_audios_query,
-    "mixed_modalities": get_mixed_modalities_query,
+    "use_multi_audios": get_multi_audios_query,
+    "use_mixed_modalities": get_mixed_modalities_query,
+    "use_audio_in_video": get_use_audio_in_video_query,
 }
 
 
@@ -313,6 +340,7 @@ class VideoDataset(DatasetBase):
 
 def main(args):
     model_name = "Qwen/Qwen3-Omni-30B-A3B-Instruct"
+    print("=" * 20, "\n", f"vllm version: {vllm.__version__}", "\n", "=" * 20)
 
     if args.hf_dataset is not None:
         if args.hf_dataset in VideoDataset.SUPPORTED_DATASET_PATHS:
@@ -325,6 +353,31 @@ def main(args):
             raise ValueError(f"Dataset {args.dataset_path} is not supported.")
         prompts = dataset_cls(**common_kwargs).sample(**sample_kwargs)
 
+    # Get paths from args
+    video_path = getattr(args, "video_path", None)
+    image_path = getattr(args, "image_path", None)
+    audio_path = getattr(args, "audio_path", None)
+
+    # Get the query function and call it with appropriate parameters
+    query_func = query_map[args.query_type]
+    if args.query_type == "use_video":
+        query_result = query_func(video_path=video_path, num_frames=getattr(args, "num_frames", 16))
+    elif args.query_type == "use_image":
+        query_result = query_func(image_path=image_path)
+    elif args.query_type == "use_audio":
+        query_result = query_func(audio_path=audio_path, sampling_rate=getattr(args, "sampling_rate", 16000))
+    elif args.query_type == "mixed_modalities":
+        query_result = query_func(
+            video_path=video_path,
+            image_path=image_path,
+            audio_path=audio_path,
+            num_frames=getattr(args, "num_frames", 16),
+            sampling_rate=getattr(args, "sampling_rate", 16000),
+        )
+    elif args.query_type == "multi_audios":
+        query_result = query_func()
+    elif args.query_type == "use_audio_in_video":
+        query_result = query_func()
     else:
         # Get paths from args
         video_path = getattr(args, "video_path", None)
@@ -367,7 +420,7 @@ def main(args):
     )
 
     thinker_sampling_params = SamplingParams(
-        temperature=0.4,
+        temperature=0.9,
         top_p=0.9,
         top_k=-1,
         max_tokens=1200,
@@ -418,6 +471,8 @@ def main(args):
 
     total_requests = len(prompts)
     processed_count = 0
+
+    print(f"query type: {args.query_type}")
 
     for stage_outputs in omni_generator:
         if stage_outputs.final_output_type == "text":
@@ -473,7 +528,7 @@ def parse_args():
         "--query-type",
         "-q",
         type=str,
-        default="mixed_modalities",
+        default="use_mixed_modalities",
         choices=query_map.keys(),
         help="Query type.",
     )
