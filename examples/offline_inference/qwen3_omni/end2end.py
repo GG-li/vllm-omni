@@ -6,8 +6,6 @@ with the correct prompt format on Qwen3-Omni (thinker only).
 """
 
 import os
-import subprocess
-import tempfile
 import time
 from typing import NamedTuple
 
@@ -291,51 +289,55 @@ class DatasetBase:
 
 
 class VideoDataset(DatasetBase):
-    """Dataset for video data."""
+    """Dataset class for loading and sampling video data.
+
+    Note:
+        The UCF101_subset is distributed as compressed archive files.
+        You need to:
+        1. Extract the compressed files to a local directory first.
+        2. Add the extracted local path to the SUPPORTED_DATASET_PATHS.
+    Args:
+        hf_dataset: The name of the Huggingface dataset (e.g. "sayakpaul/ucf101-subset").
+        dataset_path: Local path of the dataset.
+        num_samples: Number of samples to load (default: 16).
+        **kwargs: Additional arguments for the base class.
+    """
 
     def __init__(
         self,
+        hf_dataset,
         dataset_path,
         num_samples: int = 16,
         **kwargs,
     ) -> None:
         super().__init__(dataset_path=dataset_path, **kwargs)
         self.num_samples = num_samples
+        self.hf_dataset = hf_dataset
         self.load_data()
 
     SUPPORTED_DATASET_PATHS = {"sayakpaul/ucf101-subset"}
 
     def load_data(self) -> None:
-        self.data = load_dataset("webdataset", data_files=self.dataset_path, split=f"train[:{self.num_samples}]")
+        if self.dataset_path is not None:
+            self.data = load_dataset(path=self.dataset_path, split=f"train[:{self.num_samples}]").with_format("arrow")
+        elif self.hf_dataset is not None:
+            self.data = load_dataset(path=self.hf_dataset, split=f"train[:{self.num_samples}]").with_format("arrow")
+        else:
+            raise ValueError("Either dataset_path or hf_dataset must be provided.")
 
     def sample(
         self,
         num_samples,
     ) -> list:
-        dataset_name = self.dataset_path
-        print(f"[Info] Loading video dataset: {dataset_name}")
-        prompts = []
-        data_dir = "download_videos"
-        os.makedirs(data_dir, exist_ok=True)
-
+        prompt = []
         for i in range(min(len(self.data), num_samples)):
-            sample = self.data[i]
-            video_bytes = sample["avi"]
-            mp4_path = os.path.join(data_dir, f"sample_{i + 1}.mp4")
-
-            if not os.path.exists(mp4_path):
-                with tempfile.NamedTemporaryFile(delete=True, suffix=".mp4") as tmp_avi:
-                    tmp_avi.write(video_bytes)
-                    tmp_avi.flush()
-                    subprocess.run(
-                        ["ffmpeg", "-y", "-i", tmp_avi.name, "-c:v", "copy", "-c:a", "copy", mp4_path],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
-
-            query_result = get_video_query(video_path=mp4_path, num_frames=getattr(args, "num_frames", 16))
-            prompts.append(query_result.inputs)
-        return prompts
+            output_path = self.data[i]["video"]
+            video_path = str(output_path[0][1])
+            query_result = get_video_query(
+                question=args.question, video_path=video_path, num_frames=getattr(args, "num_frames", 16)
+            )
+            prompt.append(query_result.inputs)
+        return prompt
 
 
 def main(args):
@@ -343,76 +345,33 @@ def main(args):
     print("=" * 20, "\n", f"vllm version: {vllm.__version__}", "\n", "=" * 20)
     prompt = []
 
-    if args.hf_dataset is not None:
-        if args.hf_dataset in VideoDataset.SUPPORTED_DATASET_PATHS:
-            dataset_cls = VideoDataset
-            common_kwargs = {"dataset_path": args.dataset_path, "num_samples": args.num_samples}
-            sample_kwargs = {
-                "num_samples": args.num_samples,
-            }
-        else:
-            raise ValueError(f"Dataset {args.dataset_path} is not supported.")
-        prompts = dataset_cls(**common_kwargs).sample(**sample_kwargs)
+    # Get paths from args
+    video_path = getattr(args, "video_path", None)
+    image_path = getattr(args, "image_path", None)
+    audio_path = getattr(args, "audio_path", None)
 
+    # Get the query function and call it with appropriate parameters
+    query_func = query_map[args.query_type]
+    if args.query_type == "use_video":
+        query_result = query_func(video_path=video_path, num_frames=getattr(args, "num_frames", 16))
+    elif args.query_type == "use_image":
+        query_result = query_func(image_path=image_path)
+    elif args.query_type == "use_audio":
+        query_result = query_func(audio_path=audio_path, sampling_rate=getattr(args, "sampling_rate", 16000))
+    elif args.query_type == "mixed_modalities" and args.hf_dataset is None:
+        query_result = query_func(
+            video_path=video_path,
+            image_path=image_path,
+            audio_path=audio_path,
+            num_frames=getattr(args, "num_frames", 16),
+            sampling_rate=getattr(args, "sampling_rate", 16000),
+        )
+    elif args.query_type == "multi_audios":
+        query_result = query_func()
+    elif args.query_type == "use_audio_in_video":
+        query_result = query_func()
     else:
-        # Get paths from args
-        video_path = getattr(args, "video_path", None)
-        image_path = getattr(args, "image_path", None)
-        audio_path = getattr(args, "audio_path", None)
-
-        # Get the query function and call it with appropriate parameters
-        query_func = query_map[args.query_type]
-        if args.query_type == "use_video":
-            query_result = query_func(video_path=video_path, num_frames=getattr(args, "num_frames", 16))
-        elif args.query_type == "use_image":
-            query_result = query_func(image_path=image_path)
-        elif args.query_type == "use_audio":
-            query_result = query_func(audio_path=audio_path, sampling_rate=getattr(args, "sampling_rate", 16000))
-        elif args.query_type == "mixed_modalities":
-            query_result = query_func(
-                video_path=video_path,
-                image_path=image_path,
-                audio_path=audio_path,
-                num_frames=getattr(args, "num_frames", 16),
-                sampling_rate=getattr(args, "sampling_rate", 16000),
-            )
-        elif args.query_type == "multi_audios":
-            query_result = query_func()
-        elif args.query_type == "use_audio_in_video":
-            query_result = query_func()
-        else:
-            # Get paths from args
-            video_path = getattr(args, "video_path", None)
-            image_path = getattr(args, "image_path", None)
-            audio_path = getattr(args, "audio_path", None)
-
-            # Get the query function and call it with appropriate parameters
-            query_func = query_map[args.query_type]
-            if args.query_type == "use_video":
-                query_result = query_func(video_path=video_path, num_frames=getattr(args, "num_frames", 16))
-            elif args.query_type == "use_image":
-                query_result = query_func(image_path=image_path)
-            elif args.query_type == "use_audio":
-                query_result = query_func(audio_path=audio_path, sampling_rate=getattr(args, "sampling_rate", 16000))
-            elif args.query_type == "mixed_modalities":
-                query_result = query_func(
-                    video_path=video_path,
-                    image_path=image_path,
-                    audio_path=audio_path,
-                    num_frames=getattr(args, "num_frames", 16),
-                    sampling_rate=getattr(args, "sampling_rate", 16000),
-                )
-            else:
-                query_result = query_func()
-
-            if args.txt_prompts is None:
-                prompts = [query_result.inputs for _ in range(args.num_prompts)]
-            else:
-                assert args.query_type == "text", "txt-prompts is only supported for text query type"
-                with open(args.txt_prompts, encoding="utf-8") as f:
-                    lines = [ln.strip() for ln in f.readlines()]
-                    prompts = [get_text_query(ln).inputs for ln in lines if ln != ""]
-                    print(f"[Info] Loaded {len(prompts)} prompts from {args.txt_prompts}")
+        query_result = query_func()
 
     omni_llm = Omni(
         model=model_name,
@@ -457,6 +416,29 @@ def main(args):
         talker_sampling_params,  # code predictor is integrated into talker for Qwen3 Omni
         code2wav_sampling_params,
     ]
+
+    if args.txt_prompts is None and args.hf_dataset is None:
+        prompts = [query_result.inputs for _ in range(args.num_prompts)]
+    elif args.hf_dataset is not None:
+        if args.hf_dataset in VideoDataset.SUPPORTED_DATASET_PATHS:
+            dataset_cls = VideoDataset
+            common_kwargs = {
+                "hf_dataset": args.hf_dataset,
+                "dataset_path": args.dataset_path,
+                "num_samples": args.num_prompts,
+            }
+            sample_kwargs = {
+                "num_samples": args.num_samples,
+            }
+        else:
+            raise ValueError(f"Unsupported hf_dataset: {args.hf_dataset}")
+        prompts = dataset_cls(**common_kwargs).sample(**sample_kwargs)
+    else:
+        assert args.query_type == "text", "txt-prompts is only supported for text query type"
+        with open(args.txt_prompts, encoding="utf-8") as f:
+            lines = [ln.strip() for ln in f.readlines()]
+            prompts = [get_text_query(ln).inputs for ln in lines if ln != ""]
+            print(f"[Info] Loaded {len(prompts)} prompts from {args.txt_prompts}")
 
     if args.modalities is not None:
         output_modalities = args.modalities.split(",")
@@ -641,20 +623,26 @@ def parse_args():
     parser.add_argument(
         "--hf-dataset",
         type=str,
-        default=None,
-        help="Name of the Hugging Face dataset for video inference.",
+        default="sayakpaul/UCF101_subset",
+        help="Name of the Hugging Face dataset.",
     )
     parser.add_argument(
         "--dataset-path",
         type=str,
-        default="home/lsh-omni/.ucf101/UCF101_subset.tar.gz",
-        help="Path to local dataset for video inference.",
+        default=None,
+        help="Path to local dataset.",
     )
     parser.add_argument(
         "--num-samples",
         type=int,
         default=1,
-        help="Number of samples to use from the video dataset (default: 1).",
+        help="Number of samples to use from the dataset.",
+    )
+    parser.add_argument(
+        "--question",
+        type=str,
+        default="What is the content of the video?",
+        help="Question to ask the model.",
     )
 
     return parser.parse_args()
