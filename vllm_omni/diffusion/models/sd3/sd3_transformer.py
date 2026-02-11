@@ -64,7 +64,7 @@ class FeedForward(nn.Module):
         if final_dropout:
             self.net.append(nn.Dropout(dropout))
 
-    def forward(self, hidden_states: torch.Tensor, *args, **kargs) -> torch.Tensor:
+    def forward(self, hidden_states: torch.Tensor, *args, **kwargs) -> torch.Tensor:
         hidden_states = self.net[0](hidden_states)
         hidden_states = self.net[1](hidden_states)
         hidden_states, _ = self.net[2](hidden_states)
