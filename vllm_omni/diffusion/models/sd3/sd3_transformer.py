@@ -7,8 +7,9 @@ import torch.nn.functional as F
 # TODO replace this with vLLM implementation
 from diffusers.models.embeddings import CombinedTimestepTextProjEmbeddings, PatchEmbed
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
-from diffusers.models.normalization import AdaLayerNormContinuous, AdaLayerNormZero, RMSNorm, SD35AdaLayerNormZeroX
+from diffusers.models.normalization import AdaLayerNormContinuous, AdaLayerNormZero, SD35AdaLayerNormZeroX
 from vllm.logger import init_logger
+from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -65,11 +66,9 @@ class FeedForward(nn.Module):
             self.net.append(nn.Dropout(dropout))
 
     def forward(self, hidden_states: torch.Tensor, *args, **kwargs) -> torch.Tensor:
-        hidden_states = self.net[0](hidden_states)
-        hidden_states = self.net[1](hidden_states)
-        hidden_states, _ = self.net[2](hidden_states)
-        if len(self.net) > 3:
-            hidden_states = self.net[3](hidden_states)
+        for layer in self.net:
+            output = layer(hidden_states)
+            hidden_states = output[0] if isinstance(output, tuple) else output
         return hidden_states
 
 
@@ -132,8 +131,6 @@ class SD3CrossAttention(nn.Module):
             hidden_size=dim,
             head_size=self.head_dim,
             total_num_heads=num_heads,
-            bias=True,
-            return_bias=True,
         )
         self.norm_q = RMSNorm(head_dim, eps=eps) if qk_norm else nn.Identity()
         self.norm_k = RMSNorm(head_dim, eps=eps) if qk_norm else nn.Identity()
@@ -144,18 +141,18 @@ class SD3CrossAttention(nn.Module):
                 added_kv_proj_dim,
                 head_size=self.inner_kv_dim // self.num_heads,
                 total_num_heads=self.num_heads,
-                bias=True,
-                return_bias=True,
             )
+        else:
+            self.add_kv_proj = None
 
         if not context_pre_only:
-            self.to_add_out = RowParallelLinear(self.inner_dim, self.dim, bias=out_bias, input_is_parallel=True)
+            self.to_add_out = RowParallelLinear(self.inner_dim, self.dim, bias=out_bias)
         else:
             self.to_add_out = None
 
         if not pre_only:
             self.to_out = nn.ModuleList([])
-            self.to_out.append(RowParallelLinear(self.inner_dim, self.dim, bias=out_bias, input_is_parallel=True))
+            self.to_out.append(RowParallelLinear(self.inner_dim, self.dim, bias=out_bias))
         else:
             self.to_out = None
 
@@ -175,7 +172,8 @@ class SD3CrossAttention(nn.Module):
         encoder_hidden_states: torch.Tensor | None = None,
     ):
         # Compute QKV for image stream (sample projections)
-        qkv, _ = self.to_qkv(hidden_states)
+        qkv = self.to_qkv(hidden_states)
+        qkv = qkv[0]
         img_query, img_key, img_value = qkv.chunk(3, dim=-1)
 
         # Reshape for multi-head attention
@@ -190,7 +188,8 @@ class SD3CrossAttention(nn.Module):
 
         if encoder_hidden_states is not None:
             # Compute QKV for text stream (context projections)
-            qkv_add, _ = self.add_kv_proj(encoder_hidden_states)
+            qkv_add = self.add_kv_proj(encoder_hidden_states)
+            qkv_add = qkv_add[0]
             txt_query, txt_key, txt_value = qkv_add.chunk(3, dim=-1)
 
             txt_query = txt_query.unflatten(-1, (local_num_heads, -1))
@@ -219,8 +218,6 @@ class SD3CrossAttention(nn.Module):
         hidden_states = hidden_states.to(query.dtype)
 
         if encoder_hidden_states is not None:
-            qkv_add, _ = self.add_kv_proj(encoder_hidden_states)
-            txt_query, txt_key, txt_value = qkv_add.chunk(3, dim=-1)
             # Split attention outputs back
             context_seqlen = encoder_hidden_states.shape[1]
             hidden_states, encoder_hidden_states = (
